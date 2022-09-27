@@ -22,6 +22,8 @@ from fx_trading.utils import constants as cst
 
 from borb.pdf.canvas.layout.annotation.square_annotation import SquareAnnotation
 
+from fx_trading.utils.parallel_tasks import AsyncMP
+
 
 def build_title(title, text_color=HexColor('ffffff'), background_color=HexColor('000000'),
                 font="Times-Bold", font_size=12, padding_left=5, alignment=Alignment.LEFT):
@@ -418,8 +420,8 @@ class BuildTables:
         self.intro_page()
         self.build_hist_chart()
         self.descriptive_page()
-        # self.run_candle_max_gain()
-        # self.run_candle_sticks_entry_stats()
+        self.run_candle_max_gain()
+        self.run_candle_sticks_entry_stats()
 
 
 class BuildStrategyReport:
@@ -440,5 +442,14 @@ class BuildStrategyReport:
             PDF.dumps(pdf_file, pdf)
 
 
+
+def report(fx_pair):
+    BuildStrategyReport(fx_pair).run()
+
+
 if __name__ == '__main__':
-    BuildStrategyReport('eurusd').run()
+    # for fx_pair in cst.FX_PIP:
+    #     BuildStrategyReport(fx_pair).run()
+
+    params = [(fx_pair,) for fx_pair in cst.FX_PIP]
+    AsyncMP().exec(params, report)

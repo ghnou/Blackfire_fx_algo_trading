@@ -32,7 +32,7 @@ FX_15MIN_DATA_PATH = RAW_DATA_PATH + '/fx_15min'
 FX_1H_DATA_PATH = RAW_DATA_PATH + 'fx_data/fx_1h'
 FX_4H_DATA_PATH = RAW_DATA_PATH + 'fx_data/fx_4h'
 FX_1D_DATA_PATH = RAW_DATA_PATH + 'fx_data/fx_1D'
-FX_TICK_CHUNK_DATA_PATH = RAW_DATA_PATH + 'fx_data/fx_tick_per_chunk'
+FX_TICK_CHUNK_DATA_PATH = RAW_DATA_PATH + '/fx_tick_per_chunk'
 
 # Statistics
 RAW_STATS_PATH = str(Path(__file__).parent.parent.parent) + '/'
@@ -42,10 +42,10 @@ FX_STATS_ROOT = RAW_STATS_PATH + 'fx_stats/{}/{}/report.pdf'
 
 
 DATE = 'DATE'
-OPEN = 'OpenLAST'
-HIGH = 'HighLAST'
-LOW = 'LowLAST'
-CLOSE = 'CloseLAST'
+OPEN = 'OpenBID'
+HIGH = 'HighBID'
+LOW = 'LowBID'
+CLOSE = 'CloseBID'
 PAIR = 'FX_PAIR'
 CANDLESIZE = 'CandleSIZE'
 CANDLECOLOR = 'Candle'

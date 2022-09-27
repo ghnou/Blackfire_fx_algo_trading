@@ -9,7 +9,7 @@ from fx_trading.utils.parallel_tasks import AsyncMP
 
 def resample_data(df, freq='15min', pip_units=10_000):
 
-    df = df.resample(freq, label='right', closed='right').agg(
+    df = df.resample(freq, closed='right').agg(
         ['min', 'max', 'last', 'first']
 
     ).dropna(how='all')

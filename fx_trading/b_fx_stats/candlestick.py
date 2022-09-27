@@ -9,6 +9,7 @@ from fx_trading.utils.parallel_tasks import AsyncMP
 
 
 CANDLE_NAMES = talib.get_function_groups()['Pattern Recognition']
+CANDLE_NAMES = ['CDLENGULFING']
 
 
 def add_candlestick_pattern(df):
@@ -35,7 +36,8 @@ def fast_prepare_data(df, fx_pair, forecast_period):
     df[CANDLE_NAMES] = df[CANDLE_NAMES].shift(1)
 
     _df = df[[cst.LOW, cst.HIGH, cst.OPEN]].copy()
-    header = ['FORECAST_PERIOD_LOW', 'FORECAST_PERIOD_HIGH', 'BEAR_STOP', 'BULL_STOP', 'BEAR_TP', 'BULL_TP']
+    header = ['FORECAST_PERIOD_LOW', 'FORECAST_PERIOD_HIGH', 'BEAR_STOP', 'BULL_STOP', 'BEAR_TP', 'BULL_TP',
+              'FORECAST_PERIOD_ENTRY_BEAR', 'FORECAST_PERIOD_ENTRY_BULL']
     _df.loc[:, header] = np.NaN
     x = _df.values
 
@@ -51,9 +53,13 @@ def fast_prepare_data(df, fx_pair, forecast_period):
         bear_stop = (np.nanmax(subset[:forecast_period_low + 1, 1]) - subset[0, 2]) * cst.FX_PIP[fx_pair]
         bull_stop = (subset[0, 2] - np.nanmin(subset[:forecast_period_high + 1, 0])) * cst.FX_PIP[fx_pair]
 
-        x[pos, -6:] = [forecast_period_low + 1, forecast_period_high + 1, bear_stop, bull_stop, bear_tp, bull_tp]
+        bear_entry_period = np.nanargmax(subset[:forecast_period_low + 1, 1])
+        bull_entry_period = np.nanargmin(subset[:forecast_period_high + 1, 0])
 
-    df.loc[:, header] = x[:, -6:]
+        x[pos, -8:] = [forecast_period_low + 1, forecast_period_high + 1, bear_stop, bull_stop, bear_tp, bull_tp,
+                       bear_entry_period + 1, bull_entry_period + 1]
+
+    df.loc[:, header] = x[:, -8:]
     df.set_index([cst.FX_PAIR, cst.DATE], inplace=True)
 
     return df.dropna(subset=['BULL_TP'])
@@ -223,7 +229,7 @@ def get_optimal_entry_stats(df, pip_target):
     group_by_total = [cst.FX_PAIR, 'Candle_type']
     index = [cst.FX_PAIR, 'Candle_type', 'YEAR']
 
-    for e in [0, 5, 10, 15]:
+    for e in [10]:
 
         df['TARGET'] = df['TP'] + e
         df['NEW_STOP'] = df['STOP'] - e
@@ -269,7 +275,7 @@ def get_optimal_entry_stats(df, pip_target):
 
 def run_potential_entry(df, pip_target):
 
-    header = ['TP', 'STOP', 'PERIOD_TP']
+    header = ['TP', 'STOP', 'PERIOD_TP', 'PERIOD_ENTRY']
     stats = {}
     for candle in CANDLE_NAMES:
 
@@ -278,11 +284,13 @@ def run_potential_entry(df, pip_target):
         df.loc[df[candle].fillna(-1) > 0, 'TP'] = df['BULL_TP']
         df.loc[df[candle].fillna(-1) > 0, 'STOP'] = df['BULL_STOP']
         df.loc[df[candle].fillna(-1) > 0, 'PERIOD_TP'] = df['FORECAST_PERIOD_HIGH']
+        df.loc[df[candle].fillna(-1) > 0, 'PERIOD_ENTRY'] = df['FORECAST_PERIOD_ENTRY_BULL']
 
         df.loc[df[candle].fillna(1) < 0, 'Candle_type'] = cst.BEARISH
         df.loc[df[candle].fillna(1) < 0, 'TP'] = df['BEAR_TP']
         df.loc[df[candle].fillna(1) < 0, 'STOP'] = df['BEAR_STOP']
         df.loc[df[candle].fillna(1) < 0, 'PERIOD_TP'] = df['FORECAST_PERIOD_LOW']
+        df.loc[df[candle].fillna(1) < 0, 'PERIOD_ENTRY'] = df['FORECAST_PERIOD_ENTRY_BEAR']
 
         _df = df.copy()
         _df.dropna(subset=['Candle_type'], inplace=True)
@@ -318,7 +326,8 @@ def build_candlestick_pattern_analysis(fx_pair, date_range, path=cst.FX_15MIN_DA
     fx_quote[cst.FX_PAIR] = fx_quote[cst.FX_PAIR].astype(str)
     fx_quote = fx_quote.set_index(cst.FX_PAIR, append=True).swaplevel(axis=0)
     fx_quote.sort_index(inplace=True)
-
+    fx_quote = fx_quote[[cst.OPEN, cst.HIGH, cst.LOW, cst.CLOSE]]
+    return fx_quote
     #############################################################################
     # Add candlestick pattern
     #############################################################################
@@ -332,29 +341,28 @@ def build_candlestick_pattern_analysis(fx_pair, date_range, path=cst.FX_15MIN_DA
     params = [(df, name, forecasting_period) for (name, df) in fx_quote.groupby(level=0)]
     fx_quote = pd.concat(AsyncMP().exec(params, fast_prepare_data))
     del params
-
+    return fx_quote
     #############################################################################
     # Stats for each FX pair
     #############################################################################
 
     bulk_create_sav_dir(fx_pair)
-
-    per_fx_stats = run_potential_entry(fx_quote, pip_target=[5, 10, 15, 20])
+    per_fx_stats = run_potential_entry(fx_quote, pip_target=[10])
 
     per_fx_stats.groupby(cst.FX_PAIR).apply(
         lambda x: save_data(
             x,
-            path=cst.FX_STATS_CANDLESTICK.format(cst.ASSET[x.name], x.name) + f'potential_entry.parquet',
+            path=cst.FX_STATS_CANDLESTICK.format(cst.ASSET[x.name], x.name) + f'potential_entry_plus.parquet',
             partition_cols=None
         )
     )
 
-    per_fx_stats = run_max_gain_stats(fx_quote, pip_target=[5, 10, 15, 20])
+    per_fx_stats = run_max_gain_stats(fx_quote, pip_target=[10])
 
     per_fx_stats.groupby(cst.FX_PAIR).apply(
         lambda x: save_data(
             x,
-            path=cst.FX_STATS_CANDLESTICK.format(cst.ASSET[x.name], x.name) + f'max_g.parquet',
+            path=cst.FX_STATS_CANDLESTICK.format(cst.ASSET[x.name], x.name) + f'max_g_plus.parquet',
             partition_cols=None
         )
     )
@@ -368,14 +376,32 @@ def report(fx_pair):
 
 if __name__ == '__main__':
 
-    DATE_RANGE = list(range(2000, 2023))
+    DATE_RANGE = list(range(2022, 2023))
     FX_PAIR = list(cst.FX_PIP.keys())
-    # FX_PAIR = ['eurusd']
-
-    for i in range(49, len(FX_PAIR), 7):
+    FX_PAIR = ['eurgbp']
+    for i in range(0, len(FX_PAIR), 7):
         pairs = FX_PAIR[i: i + 7]
         print(pairs)
         df = build_candlestick_pattern_analysis(pairs, DATE_RANGE, path=cst.FX_15MIN_DATA_PATH)
+
+    # bullish, bearish = {}, {}
+    #
+    # for pair in FX_PAIR:
+    #     if cst.ASSET[pair]==cst.FX:
+    #         path = cst.FX_STATS_CANDLESTICK.format(cst.ASSET[pair], pair) + f'potential_entry_plus.parquet'
+    #         df = pd.read_parquet(path).drop(columns=[('Stats', ), ('FX_PAIR',)])\
+    #             .set_index([('Candle_name',), ('Candle_type', ), ('DATE', )])
+    #         bullish[pair] = df[('Open - 10', 'N. Obs')].xs('2022', level=-1).xs(cst.BULLISH, level=-1)
+    #         bearish[pair] = df[('Open - 10', 'N. Obs')].xs('2022', level=-1).xs(cst.BEARISH, level=-1)
+    #
+    # path = 'D:/Blackfire_Projects/Blackfire_fx_algo_trading/fx_stats/FOREX/'
+    # bullish = pd.concat(bullish, axis=1).sort_index().sort_index(axis=1)
+    # # bullish.to_excel(path + 'Candlestick_bull_statsn2.xlsx')
+    # bearish = pd.concat(bearish, axis=1).sort_index().sort_index(axis=1)
+    # bearish.to_excel(path + 'Candlestick_bear_statsn2.xlsx')
+    # # FX_PAIR = ['eurusd']
+    # print(CANDLE_NAMES)
+
     # for fx_pair in cst.FX_PIP:
     #     build_candlestick_pattern_analysis(fx_pair, DATE_RANGE, path=cst.FX_15MIN_DATA_PATH)
     #     report(fx_pair)
