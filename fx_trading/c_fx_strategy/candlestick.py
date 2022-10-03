@@ -9,7 +9,6 @@ import pandas as pd
 import numpy as np
 from backtrader.indicators import EMA
 
-
 class MACD(bt.Indicator):
     lines = ('long', 'short')
     params = (('long_period', 251), ('short_period', 21))
@@ -42,6 +41,7 @@ class TradeClosed(bt.analyzers.Analyzer):
         if trade.isclosed:
             self.vals = (
                 self.strategy.datetime.datetime(),
+                trade.tradeid,
                 trade.data._name,
                 round(trade.pnl, 2),
                 round(trade.pnlcomm, 2),
@@ -52,6 +52,7 @@ class TradeClosed(bt.analyzers.Analyzer):
                 trade.dtclose,
                 (trade.dtclose - trade.dtopen),
             )
+
             self.rets[trade.ref] = self.vals
 
     def get_analysis(self):
@@ -75,11 +76,14 @@ class HighProbCandleStick(bt.Strategy):
     def __init__(self):
 
         self.fx_manager = {}
+        self.rets = {}
         self.order_manager = dict()
+        self.trade_manager = dict()
         self.n_wins = 0
         self.n_losses = 0
         self.profits = 0
         self.losses = 0
+        self.vals = tuple()
 
         for i, d in enumerate(self.datas):
             name = d._name
@@ -88,6 +92,7 @@ class HighProbCandleStick(bt.Strategy):
             if fx_pair not in self.fx_manager:
                 self.fx_manager[fx_pair] = dict()
                 self.order_manager[fx_pair] = {}
+                self.trade_manager[fx_pair] = {}
             self.fx_manager[fx_pair][attrib] = d
 
             if attrib == 'bar15MIN':
@@ -169,6 +174,24 @@ class HighProbCandleStick(bt.Strategy):
         else:
             self.n_losses += 1
             self.losses += trade.pnl
+        self.vals = (
+            self.data.datetime.datetime(),
+            trade.tradeid,
+            trade.data._name,
+            round(trade.pnl, 2),
+            round(trade.pnlcomm, 2),
+            10_000 * abs(
+                self.trade_manager['eurgbp'][trade.tradeid][0] - self.trade_manager['eurgbp'][trade.tradeid][1]),
+            trade.commission,
+            trade.baropen,
+            trade.barclose,
+            trade.dtopen,
+            trade.dtclose,
+            (trade.dtclose - trade.dtopen),
+        )
+
+        #
+        self.rets[trade.ref] = self.vals
 
     @staticmethod
     def pending_orders(dict_orders):
@@ -197,6 +220,25 @@ class HighProbCandleStick(bt.Strategy):
                 active_orders[main.ref] = order
 
         return active_orders
+
+    def get_max_loss(self, current_price, fx_pair):
+
+        dict_active_orders = self.active_orders(self.order_manager[fx_pair])
+
+        for order_ref in dict_active_orders:
+            order = dict_active_orders[order_ref]
+            main = order[0]
+            sl = order[1]
+            tp = order[2]
+            tp = sl if tp is None else tp
+
+            if main.tradeid not in self.trade_manager[fx_pair]:
+                self.trade_manager[fx_pair][main.tradeid] = [main.executed.price, main.executed.price]
+
+            if (main.ordtype == 0) & (self.trade_manager[fx_pair][main.tradeid][1] > current_price):
+                self.trade_manager[fx_pair][main.tradeid][1] = current_price
+            elif (main.ordtype == 1) & (self.trade_manager[fx_pair][main.tradeid][1] < current_price):
+                self.trade_manager[fx_pair][main.tradeid][1] = current_price
 
     ###########################################################################################################
     # Order type
@@ -262,7 +304,7 @@ class HighProbCandleStick(bt.Strategy):
                  'TP Ref: %1d  @ %.5f' % (highside.ref, p3),
                  'SL Ref: %1d  @ %.5f' % (lowside.ref, p2)
                  ])
-            # self.log(txt)
+            self.log(txt)
         elif type == 'SELL':
 
             p1 = price + self.p.entry_pip / cst.FX_PIP[fx_pair]
@@ -452,6 +494,8 @@ class HighProbCandleStick(bt.Strategy):
                  '%.04d' % pattern[0]]
             )
 
+            self.get_max_loss(bid.close[0], fx_pair)
+
             if self.counter != len(bar):
                 # print(txt)
                 ######################################################################################
@@ -481,6 +525,11 @@ class HighProbCandleStick(bt.Strategy):
                 self.counter = len(bar)
 
     def stop(self):
+
+        df = pd.DataFrame(self.rets).T
+        print(df)
+        print(df[df[3] < 0])
+        df.to_csv('stats_max_losses.csv')
         win_ratio = self.n_wins / (self.n_wins + self.n_losses)
         avg_profit = self.profits / self.n_wins
         avg_loss = self.losses / self.n_losses
@@ -491,13 +540,17 @@ class HighProbCandleStick(bt.Strategy):
               f"expected_profit_per_trade: {expected_profit_per_trade:.2f}")
 
 
+
+    def get_analysis(self):
+        return self.rets
+
 def runstrat(indicator, args=None):
 
     args = parse_args(args)
     cerebro = bt.Cerebro()
     
     # data = read_data(cst.FX_TICK_CHUNK_DATA_PATH, args.fx_pair, args.year)
-    data = pd.read_parquet('sample.parquet')
+    data = pd.read_parquet('sample.parquet').loc['2022-01-02': '2022-01-03']
 
     data_bid = bt.feeds.PandasData(
         dataname=data, open=0, high=0, low=0, close=0, name='eurgbp_bid',
@@ -513,15 +566,14 @@ def runstrat(indicator, args=None):
     cerebro.broker.setcash(10_000 * 500)
     # cerebro.addstrategy(HighProbCandleStick, ind=args.ind)
     cerebro.addstrategy(HighProbCandleStick, ind=indicator)
-    cerebro.addanalyzer(TradeClosed, _name="trade_closed")
+    # cerebro.addanalyzer(TradeClosed, _name="trade_closed")
 
     thestrats = cerebro.run(runonce=False, stdstats=True)
-    thestrat = thestrats[0]
+    # thestrat = thestrats[0]
 
-    df = pd.DataFrame(thestrat.analyzers.trade_closed.get_analysis()).T
-    df.to_csv('result_root_{}.csv'.format(indicator))
-    print(df)
-    print(df[df[2] < 0])
+    # df = pd.DataFrame(cerebro.rets).T
+    # df.to_csv('result_root_{}.csv'.format(indicator))
+
     # if args.plot:
     pkwargs = dict(style='bar')
     # if args.plot is not True:  # evals to True but is not True
@@ -530,7 +582,7 @@ def runstrat(indicator, args=None):
 
     # cerebro.plot(volume=False, **pkwargs)
 
-    return df
+    # return df
 
 def parse_args(pargs=None):
 
@@ -580,6 +632,10 @@ def parse_args(pargs=None):
 
 if __name__ == '__main__':
 
-    for ind in HighProbCandleStick.HIGH_PROBABILITIES_CANDLES:
+    a = []
+    for ind in ['CDLENGULFING']:
+        # df = pd.read_csv('result_root_{}.csv'.format(ind))
+        # df['CANDLE'] = ind
+        # a.append(df)
         runstrat(ind)
-    # df = runstrat()
+    # pd.concat(a).to_csv('root.csv')
