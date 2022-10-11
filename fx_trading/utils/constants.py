@@ -95,6 +95,11 @@ ASSET = {'eurusd': FX, 'eurchf': FX, 'eurgbp': FX, 'eurjpy': FX, 'euraud': FX, '
          'cadchf': FX, 'eurdkk': FX, 'eurnok': FX, 'eurtry': FX, 'gbpcad': FX, 'nsxusd': INDEX,
          'ukxgbp': INDEX, 'usddkk': FX, 'usdsgd': FX, 'xagusd': COMMODITY, 'xaugbp': COMMODITY}
 
+BACK_TEST = {'eurusd': FX, 'eurchf': FX, 'eurgbp': FX, 'eurjpy': FX, 'euraud': FX, 'usdcad': FX, 'usdchf': FX,
+             'usdjpy': FX, 'gbpchf': FX, 'gbpjpy': FX, 'gbpusd': FX, 'audjpy': FX, 'audusd': FX, 'chfjpy': FX,
+             'nzdjpy': FX, 'nzdusd': FX, 'eurcad': FX, 'audcad': FX, 'cadjpy': FX, 'eurnzd': FX, 'nzdcad': FX,
+             'audchf': FX, 'nzdchf': FX, 'gbpnzd': FX,  'audnzd': FX, 'cadchf': FX,  'gbpcad': FX, }
+
 #'sgdjpy': 100
 # 'xaugbp': 100
 
@@ -121,3 +126,56 @@ HEADER_FONT = "Times-Bold"
 HEADER_FONT_SIZE = 12
 
 COLORS_RGB = {CLOSE: (247/255, 149/255, 37/255)}
+
+TICK_1MIN = 60
+TICK_5MIN = 60 * 5
+TICK_15MIN = 60 * 15
+TICK_60MIN = 60 * 60
+TICK_4H = 60 * 60 * 4
+TICK_1D = 60 * 60 * 24
+
+##########################################################################
+# RE SAMPLE COLUMNS
+##########################################################################
+R_TICK = 0
+R_TIMESTAMP = 1
+R_BID = 2
+R_ASK = 3
+
+R_BAR = 0
+R_NEW_BAR = 1
+R_OPEN = 2
+R_HIGH = 3
+R_LOW = 4
+R_CLOSE = 5
+
+##########################################################################
+# BACK TEST COLUMNS
+##########################################################################
+# Trade Status
+T_PENDING_TRADE = 0
+T_ACTIVE_TRADE = 1
+T_CLOSED_TRADE = 2
+T_INACTIVE_TRADE = -1
+T_CANCEL_TRADE = 3
+
+# ORDERS
+T_ORDER_BUY = 1
+T_ORDER_SELL = -1
+
+T_TIMESTAMP = 0
+T_ORDER_TYPE = 1
+T_SPREAD = 2
+T_PRICE = 3
+
+T_ENTRY = 4
+T_SL = 5
+T_TP = 6
+T_TRADE_STATUS = 7
+T_DT_OPEN = 8
+T_DT_CLOSE = 9
+T_EXEC_ENTRY = 10
+T_EXEC_EXIT = 11
+T_PNL = 12
+T_SL_ST = 13
+T_SL_LT = 14
