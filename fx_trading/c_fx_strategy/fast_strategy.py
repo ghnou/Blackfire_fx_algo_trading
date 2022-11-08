@@ -8,7 +8,11 @@ import talib
 from pathlib import Path
 from fx_trading.utils.data_interact import read_data
 from time import time
+
+from fx_trading.utils.parallel_tasks import AsyncMP
+
 RAW_DATA_PATH = str(Path(__file__).parent)
+from ta import add_momentum_ta, add_trend_ta, add_volatility_ta, add_others_ta, add_all_ta_features
 
 RESULT_COLS = {cst.T_TIMESTAMP: 'TIMESTAMP', cst.T_ORDER_TYPE: 'ORDER_TYPE', cst.T_SPREAD: 'SPREAD',
                cst.T_PRICE: 'PRICE', cst.T_ENTRY: 'ENTRY', cst.T_SL: 'SL', cst.T_TP: 'TP',
@@ -25,6 +29,112 @@ def ffill_loop(arr, fill=0):
         mask = np.isnan(arr[i])
         arr[i][mask] = arr[i - 1][mask]
     return arr
+
+
+def rolling_window(a, window):
+    shape = a.shape[:-1] + (a.shape[-1] - window + 1, window)
+    strides = a.strides + (a.strides[-1],)
+    return np.lib.stride_tricks.as_strided(a, shape=shape, strides=strides)
+
+
+@njit(fastmath=True)
+def compute_trade_pnl(trade, signal_col, entry_price, stop_loss, take_profit,
+                      lot_size=200_000, valid=14400):
+
+    orders = np.empty((15, ))
+    orders[:] = np.NaN
+    orders[cst.T_SL_ST] = 0
+    orders[cst.T_SL_LT] = 0
+
+    for i in np.arange(trade.shape[0]):
+        signal, close_price = trade[i, signal_col], trade[i, cst.R_BID]
+        en, sl, tp = orders[cst.T_ENTRY], orders[cst.T_SL], orders[cst.T_TP]
+        order_statut, order_type = orders[cst.T_TRADE_STATUS], orders[cst.T_ORDER_TYPE]
+
+        #################################################################################################
+        # Close Buy and Sell Trades that reach target
+        #################################################################################################
+
+        if order_statut == cst.T_ACTIVE_TRADE:
+
+            if order_type == cst.T_ORDER_BUY:
+
+                orders[cst.T_PNL] = (close_price - orders[cst.T_EXEC_ENTRY]) * lot_size
+                trade_time = trade[i, cst.R_TIMESTAMP] - orders[cst.T_TIMESTAMP]
+
+                if (close_price >= tp) | (close_price <= sl):
+                    order_statut = cst.T_CLOSED_TRADE
+                    orders[cst.T_TRADE_STATUS] = cst.T_CLOSED_TRADE
+                    orders[cst.T_DT_CLOSE] = trade[i, cst.R_TIMESTAMP]
+                    orders[cst.T_EXEC_EXIT] = close_price
+
+                    return orders
+
+                if (trade_time < valid) & (orders[cst.T_EXEC_ENTRY] - close_price > orders[cst.T_SL_ST]):
+                        orders[cst.T_SL_ST] = orders[cst.T_EXEC_ENTRY] - close_price
+
+                if (trade_time >= valid) & (orders[cst.T_EXEC_ENTRY] - close_price > orders[cst.T_SL_LT]):
+                        orders[cst.T_SL_LT] = orders[cst.T_EXEC_ENTRY] - close_price
+
+            elif order_type == cst.T_ORDER_SELL:
+
+                orders[cst.T_PNL] = (orders[cst.T_EXEC_ENTRY] - close_price) * lot_size
+
+                if (close_price <= tp) | (close_price >= sl):
+                    order_statut = cst.T_CLOSED_TRADE
+                    orders[cst.T_TRADE_STATUS] = cst.T_CLOSED_TRADE
+                    orders[cst.T_DT_CLOSE] = trade[i, cst.R_TIMESTAMP]
+                    orders[cst.T_EXEC_EXIT] = close_price
+
+                    return orders
+
+                if (trade_time < valid) & (close_price - orders[cst.T_EXEC_ENTRY] > orders[cst.T_SL_ST]):
+                    orders[cst.T_SL_ST] = close_price - orders[cst.T_EXEC_ENTRY]
+                if (trade_time >= valid) & (close_price - orders[cst.T_EXEC_ENTRY] > orders[cst.T_SL_LT]):
+                     orders[cst.T_SL_LT] = close_price - orders[cst.T_EXEC_ENTRY]
+
+        if order_statut == cst.T_PENDING_TRADE:
+            if (order_type == cst.T_ORDER_BUY) & (en >= close_price):
+                order_statut = cst.T_ACTIVE_TRADE
+                orders[cst.T_DT_OPEN] = trade[i, cst.R_TIMESTAMP]
+                orders[cst.T_EXEC_ENTRY] = close_price
+                orders[cst.T_TRADE_STATUS] = cst.T_ACTIVE_TRADE
+            elif (order_type == cst.T_ORDER_SELL) & (en <= close_price):
+                order_statut = cst.T_ACTIVE_TRADE
+                orders[cst.T_DT_OPEN] = trade[i, cst.R_TIMESTAMP]
+                orders[cst.T_EXEC_ENTRY] = close_price
+                orders[cst.T_TRADE_STATUS] = cst.T_ACTIVE_TRADE
+
+        if (order_statut == cst.T_PENDING_TRADE) & (trade[i, cst.R_TIMESTAMP] - orders[cst.T_TIMESTAMP] > valid):
+            order_statut = cst.T_CANCEL_TRADE
+            orders[cst.T_TRADE_STATUS] = cst.T_CANCEL_TRADE
+            orders[cst.T_DT_CLOSE] = trade[i, cst.R_TIMESTAMP]
+            return orders
+
+        # Create New Orders
+        if signal >= 100:
+            orders[cst.T_TIMESTAMP] = trade[i, cst.R_TIMESTAMP]  # Signal Time
+            orders[ cst.T_ORDER_TYPE] = cst.T_ORDER_BUY  # Order Type
+            orders[cst.T_SPREAD] = (trade[i - 1, 7] - trade[i - 1, 8]) * 10_000  # Order Type
+            orders[cst.T_PRICE] = close_price  # Close Price
+            orders[cst.T_ENTRY] = close_price - entry_price  # Buy Price
+            orders[cst.T_SL] = close_price - entry_price - stop_loss  # Stop Loss
+            orders[cst.T_TP] = close_price - entry_price + take_profit  # Take Profit
+            orders[cst.T_TRADE_STATUS] = cst.T_PENDING_TRADE  # Trade Status
+
+        elif signal <= -100:
+            orders[cst.T_TIMESTAMP] = trade[i, cst.R_TIMESTAMP]  # Signal Time
+            orders[cst.T_ORDER_TYPE] = cst.T_ORDER_SELL  # Order Type
+            orders[cst.T_SPREAD] = (trade[i - 1, 7] - trade[i - 1, 8]) * 10_000  # Order Type
+            orders[cst.T_PRICE] = close_price  # Close Price
+            orders[cst.T_ENTRY] = close_price + entry_price  # Sell Price
+            orders[cst.T_SL] = close_price + entry_price + stop_loss  # Stop Loss
+            orders[cst.T_TP] = close_price + entry_price - take_profit  # Take Profit
+            orders[cst.T_TRADE_STATUS] = cst.T_PENDING_TRADE  # Trade status
+
+    orders[cst.T_DT_CLOSE] = trade[-1, cst.R_TIMESTAMP]
+
+    return orders
 
 
 class FastHighProbCandleStick:
@@ -63,10 +173,15 @@ class FastHighProbCandleStick:
                 label_data[candle + f'_{freq}'] = j
                 label_data_r[j] = candle + f'_{freq}'
                 j += 1
+        #
+        # for freq in self.other_signals:
+        #     for candle in self.other_signals[freq]:
+        #         label_data[candle + f'_{freq}'] = j
+        #         label_data_r[j] = candle + f'_{freq}'
+        #         j += 1
 
         self.label_data = label_data
         self.label_data_r = label_data_r
-
 
     @staticmethod
     @njit()
@@ -120,7 +235,7 @@ class FastHighProbCandleStick:
         return resample
 
     def __init__(self, fx_data_dict, price_for_signal, entry_pip, stop_loss, take_profit, valid, lot_size,
-                 re_sample_frequency, signals):
+                 re_sample_frequency, signals, other_signals):
 
         self.fx_manager = {}
         self.__entry_pip = entry_pip
@@ -130,19 +245,21 @@ class FastHighProbCandleStick:
         self.__valid = valid
         self.re_sample_frequency = re_sample_frequency
         self.candle_frequency = signals
-
+        self.other_signals = other_signals
+        self.other_signals_cols = {}
         self.initialize_labels()
         to_resample = np.array([[self.RE_SAMPLE_FREQ[i], 1] for i in self.re_sample_frequency])
         to_resample[:, 1] = 4 + (np.cumsum(to_resample[:, 1]) - 1) * 6
+        print(self.label_data)
 
-        # # self.fx_manager = {}
         for fx_pair in fx_data_dict:
             self.fx_manager[fx_pair] = self.re_sample_data(
-                fx_data_dict[fx_pair], n_frequency=to_resample, n_columns=len(self.label_data),
+                fx_data_dict[fx_pair], n_frequency=to_resample, n_columns=len(self.label_data) + 73,
                 re_sample_columns=price_for_signal
             )
 
             self.add_candlestick_pattern(fx_pair)
+            self.add_other_signals(fx_pair)
 
     def add_candlestick_pattern(self, fx_pair):
         """
@@ -169,15 +286,103 @@ class FastHighProbCandleStick:
                 self.fx_manager[fx_pair][:, pos] = 0
                 self.fx_manager[fx_pair][_df[:, 0].astype(np.int64), pos] = pattern
 
-        # self.fx_manager[fx_pair][:, to_fill[0]:to_fill[-1] + 1] = ffill_loop(self.fx_manager[fx_pair][:, to_fill[0]:to_fill[-1] + 1])
-
         return df
 
     @staticmethod
-    @njit()
-    def run_back_test(df, signal_col, entry_price, stop_loss, take_profit, lot_size=200_000, valid=14400):
+    def __add_technical_indicators(df, frequency):
 
-        orders = np.empty((df[df[:, signal_col] != 0].shape[0], 15))
+        # add_momentum_ta, add_trend_ta, add_volatility_ta
+
+        df = add_momentum_ta(
+            df, high=cst.R_HIGH, low=cst.R_LOW, close=cst.R_CLOSE, volume=cst.R_VOLUME,
+            colprefix=frequency + '_')
+
+        df = add_trend_ta(
+            df, high=cst.R_HIGH, low=cst.R_LOW, close=cst.R_CLOSE,
+            colprefix=frequency + '_'
+        )
+
+        df = add_volatility_ta(
+            df, high=cst.R_HIGH, low=cst.R_LOW, close=cst.R_CLOSE,
+            colprefix=frequency + '_'
+        )
+
+        return df
+
+    def add_other_signals(self, fx_pair):
+        """
+        Description:
+        ------------
+
+        Add Candle stick pattern to the price.
+        """
+
+        df = self.fx_manager[fx_pair]
+        to_fill = []
+        for freq in self.other_signals:
+            open_pos = self.label_data[f'OPEN_{freq}']
+            high_pos = self.label_data[f'HIGH_{freq}']
+            low_pos = self.label_data[f'LOW_{freq}']
+            close_pos = self.label_data[f'CLOSE_{freq}']
+            new_bar_pos = self.label_data[f'NEW_BAR_{freq}']
+
+            _df = df[df[:, new_bar_pos] == -1, ]
+
+            _df = pd.DataFrame(
+                _df[:, [high_pos, low_pos, close_pos]],
+                columns=[cst.R_HIGH, cst.R_LOW, cst.R_CLOSE],
+                index=_df[:, cst.R_TICK]
+            )
+            _df[cst.R_VOLUME] = np.NaN
+
+            _df = self.__add_technical_indicators(_df, freq).iloc[:, 4:]
+            i = len(self.label_data)
+            for cols in _df.columns:
+                if cols not in self.label_data:
+                    self.label_data[cols] = i
+                    self.label_data_r[i] = cols
+                    self.other_signals_cols[cols] = i
+                    i += 1
+            _df.rename(columns=self.label_data, inplace=True)
+            self.fx_manager[fx_pair][np.ix_(_df.index.astype(np.int64), _df.columns.tolist())] = _df.values
+            continue
+            for signal in self.other_signals[freq]:
+                if signal in ['Z_ADX']:
+                    pattern = getattr(talib, 'ADX')(high=_df[:, high_pos], low=_df[:, low_pos], close=_df[:, close_pos])
+                    mean = np.mean(rolling_window(pattern, 14), 1)
+                    std = np.std(rolling_window(pattern, 14), 1)
+                    value = (pattern[13:] - mean) / std
+
+                    pos = self.label_data[signal + f'_{freq}']
+                    self.fx_manager[fx_pair][:, pos] = np.NaN
+                    self.fx_manager[fx_pair][_df[13:, 0].astype(np.int64), pos] = value
+                    to_fill.append(pos)
+                elif signal in ['DIR']:
+                    minus = getattr(talib, 'MINUS_DI')(high=_df[:, high_pos], low=_df[:, low_pos], close=_df[:, close_pos])
+                    plus = getattr(talib, 'PLUS_DI')(high=_df[:, high_pos], low=_df[:, low_pos], close=_df[:, close_pos])
+
+                    value = plus - minus
+                    mean = np.mean(rolling_window(value, 14), 1)
+                    std = np.std(rolling_window(value, 14), 1)
+                    value = (value[13:] - mean) / std
+
+                    pos = self.label_data[signal + f'_{freq}']
+                    self.fx_manager[fx_pair][:, pos] = np.NaN
+                    self.fx_manager[fx_pair][_df[13:, 0].astype(np.int64), pos] = value
+                    to_fill.append(pos)
+
+                    pass
+
+        # to_fill = _df.columns.tolist()
+        # self.fx_manager[fx_pair][:, to_fill] = ffill_loop(self.fx_manager[fx_pair][:, to_fill], fill=np.NaN)
+        # print(self.fx_manager[fx_pair])
+        # return df
+
+    @staticmethod
+    @njit()
+    def run_serial_back_test(df, signal_col, entry_price, stop_loss, take_profit, lot_size=200_000, valid=14400):
+
+        orders = np.empty((df[df[:, signal_col] != 0].shape[0], 17))
         orders[:, cst.T_SL_ST] = 0
         orders[:, cst.T_SL_LT] = 0
 
@@ -252,6 +457,8 @@ class FastHighProbCandleStick:
                 orders[order_number - 1, cst.T_TP] = close_price - entry_price + take_profit   # Take Profit
                 orders[order_number - 1, cst.T_TRADE_STATUS] = cst.T_PENDING_TRADE   # Trade Status
 
+                orders[order_number - 1, -2:] = df[i, -2:]       # Signal Time
+
                 order_number += 1
             elif signal <= -100:
                 orders[order_number - 1, cst.T_TIMESTAMP] = df[i, cst.R_TIMESTAMP]  # Signal Time
@@ -263,39 +470,105 @@ class FastHighProbCandleStick:
                 orders[order_number - 1, cst.T_TP] = close_price + entry_price - take_profit  # Take Profit
                 orders[order_number - 1, cst.T_TRADE_STATUS] = cst.T_PENDING_TRADE  # Trade status
 
+                orders[order_number - 1, -2:] = df[i, -2:]
+
                 order_number += 1
 
+        return orders
+
+    @staticmethod
+    # @njit(parallel=True, fastmath=True)
+    def run_parallel_back_test(df, signal_cols, other_signal_cols, entry_price, stop_loss, take_profit,
+                               lot_size=200_000, valid=14400):
+        n_trades = 0
+        candle_start = np.empty(signal_cols.shape, dtype=np.int64)
+
+        for j in np.arange(signal_cols.shape[0]):
+            candle_start[j] = n_trades
+            n_trades += df[(df[:, signal_cols[j]] >= 100) | (df[:, signal_cols[j]] <= -100)].shape[0]
+        orders = np.empty((n_trades, 16 + other_signal_cols.shape[0]))
+
+        for signal_pos in prange(signal_cols.shape[0]):
+            signal_col = signal_cols[signal_pos]
+            all_trades = df[(df[:, signal_col] >= 100) | (df[:, signal_col] <= -100)]
+            j = candle_start[signal_pos]
+
+            for i in prange(all_trades.shape[0]):
+
+                trade = all_trades[i]
+                ts, tick = trade[cst.R_TIMESTAMP], trade[cst.R_TICK]
+                end_ts = ts + 5 * 3600 * 24
+                period_trade = df[(df[:, cst.R_TIMESTAMP] >= ts - 100) & (df[:, cst.R_TIMESTAMP] <= end_ts)]
+                period_trade[period_trade[:, cst.R_TICK] != tick, signal_col] = 0
+                orders[i + j, :15] = compute_trade_pnl(
+                    trade=period_trade, signal_col=signal_col, entry_price=entry_price, stop_loss=stop_loss,
+                    take_profit=take_profit, lot_size=lot_size, valid=valid
+                )
+                orders[i + j, 15 + other_signal_cols - np.min(other_signal_cols)] = all_trades[i, other_signal_cols]
+                orders[i + j, -1] = signal_col
         return orders
 
     def run(self):
 
         results = []
+        min_other_signal = min(self.other_signals_cols.values())
+        for i in self.other_signals_cols:
+            RESULT_COLS[15 + self.other_signals_cols[i] - min_other_signal] = i
+
         for fx_pair in self.fx_manager:
 
             df = self.fx_manager[fx_pair]
+            all_pos = np.array([self.label_data[candle + f'_{freq}'] for freq in self.candle_frequency
+                                for candle in self.candle_frequency[freq]])
 
-            for freq in self.candle_frequency:
+            r = self.run_parallel_back_test(
+                df, signal_cols=all_pos, entry_price=self.__entry_pip / cst.FX_PIP[fx_pair],
+                stop_loss=self.__stop_loss / cst.FX_PIP[fx_pair],
+                take_profit=self.__take_profit / cst.FX_PIP[fx_pair],
+                lot_size=self.__lot_size, valid=self.__valid,
+                other_signal_cols=np.array(list(self.other_signals_cols.values()))
+            )
+            r = pd.DataFrame(r, ).rename(columns=RESULT_COLS)
 
-                for candle in self.candle_frequency[freq]:
-                    pos = self.label_data[candle + f'_{freq}']
-                    r = self.run_back_test(
-                        df, signal_col=pos, entry_price=self.__entry_pip / cst.FX_PIP[fx_pair],
-                        stop_loss=self.__stop_loss / cst.FX_PIP[fx_pair],
-                        take_profit=self.__take_profit / cst.FX_PIP[fx_pair],
-                        lot_size=self.__lot_size, valid=self.__valid
-                    )
-                    r = pd.DataFrame(r, ).rename(columns=RESULT_COLS)
-                    r['DT_TIME'] = r['DT_CLOSE'] - r['DT_OPEN']
-                    r['TIMESTAMP'] = (r['TIMESTAMP'] * 10 ** 9).astype('datetime64[ns]')
-                    r['DT_OPEN'] = (r['DT_OPEN'] * 10 ** 9).astype('datetime64[ns]')
-                    r['DT_CLOSE'] = (r['DT_CLOSE'] * 10 ** 9).astype('datetime64[ns]')
-                    r['SHORT_TERM_SL'] *= cst.FX_PIP[fx_pair]
-                    r['LONG_TERM_SL'] *= cst.FX_PIP[fx_pair]
-                    r['CANDLE'] = candle
-                    r['SIGNAL_FREQ'] = freq
-                    r['FX_PAIR'] = fx_pair
-                    results.append(r)
-                    print(f'Done for {fx_pair}, Candle: {candle}')
+            candle_cols = r.iloc[:, -1].replace(self.label_data_r).str.split('_', expand=True)
+            r['DT_TIME'] = r['DT_CLOSE'] - r['DT_OPEN']
+            r['TIMESTAMP'] = (r['TIMESTAMP'] * 10 ** 9).astype('datetime64[ns]')
+            r['DT_OPEN'] = (r['DT_OPEN'] * 10 ** 9).astype('datetime64[ns]')
+            r['DT_CLOSE'] = (r['DT_CLOSE'] * 10 ** 9).astype('datetime64[ns]')
+            r['SHORT_TERM_SL'] *= cst.FX_PIP[fx_pair]
+            r['LONG_TERM_SL'] *= cst.FX_PIP[fx_pair]
+
+            r['CANDLE'] = candle_cols[0]
+            r['SIGNAL_FREQ'] = candle_cols[1]
+            r['FX_PAIR'] = fx_pair
+            results.append(r)
+            print(f'Done for {fx_pair}')
+
+            # for freq in self.candle_frequency:
+            #
+            #     for candle in self.candle_frequency[freq]:
+            #         pos = self.label_data[candle + f'_{freq}']
+            #         r = self.run_parallel_back_test(
+            #             df, signal_col=pos, entry_price=self.__entry_pip / cst.FX_PIP[fx_pair],
+            #             stop_loss=self.__stop_loss / cst.FX_PIP[fx_pair],
+            #             take_profit=self.__take_profit / cst.FX_PIP[fx_pair],
+            #             lot_size=self.__lot_size, valid=self.__valid
+            #         )
+            #         r = pd.DataFrame(r, ).rename(columns=RESULT_COLS)
+            #
+            #         r['DT_TIME'] = r['DT_CLOSE'] - r['DT_OPEN']
+            #         r['TIMESTAMP'] = (r['TIMESTAMP'] * 10 ** 9).astype('datetime64[ns]')
+            #         r['DT_OPEN'] = (r['DT_OPEN'] * 10 ** 9).astype('datetime64[ns]')
+            #         r['DT_CLOSE'] = (r['DT_CLOSE'] * 10 ** 9).astype('datetime64[ns]')
+            #         r['SHORT_TERM_SL'] *= cst.FX_PIP[fx_pair]
+            #         r['LONG_TERM_SL'] *= cst.FX_PIP[fx_pair]
+            #         r['CANDLE'] = candle
+            #         r['SIGNAL_FREQ'] = freq
+            #         r['FX_PAIR'] = fx_pair
+            #         print(r.head(10))
+            #         return
+            #         results.append(r)
+            #         print(f'Done for {fx_pair}, Candle: {candle}')
 
         return pd.concat(results)
 
@@ -325,34 +598,33 @@ def parse_args(pargs=None):
     return parser.parse_args()
 
 
-def run_strategy(args=None):
+def run_strategy(pair, args=None):
 
     args = parse_args(args)
-    # data = pd.read_parquet(RAW_DATA_PATH + '/sample.parquet')
-    pair_list = list(cst.BACK_TEST.keys())
-    data = read_data(cst.FX_TICK_CHUNK_DATA_PATH, fx_pair=pair_list, date_range=[2022])
+    data = pd.read_parquet(RAW_DATA_PATH + '/sample.parquet')
+
+    # data = read_data(cst.FX_TICK_CHUNK_DATA_PATH, fx_pair=[pair], date_range=[2022])
     data['TIMESTAMP'] = data.index.astype(np.int64) // 10 ** 9
     cols = ['TIMESTAMP', 'BID', 'ASK']
 
-    fx_data_dict = {}
-    for i in pair_list:
-        fx_data_dict[i] = data.loc[data['FX_PAIR']==i, cols]
+    signals = {'15MIN': ['CDLENGULFING']}
+    other_signals = {'5MIN': ['Z_ADX', 'DIR']}
 
-    del data
-
-    signals = {'15MIN': ['CDLENGULFING', 'CDL3LINESTRIKE'], '5MIN': ['CDLENGULFING', 'CDL3LINESTRIKE']}
-    signals = {'15MIN': talib.get_function_groups()['Pattern Recognition'], }
+    # signals = {'15MIN': talib.get_function_groups()['Pattern Recognition'], }
     t = time()
     bt = FastHighProbCandleStick(
-        fx_data_dict={args.fx_pair: data[cols].values}, entry_pip=args.entry_pip, stop_loss=args.stop_loss,
+        fx_data_dict={pair: data[cols].values}, entry_pip=args.entry_pip, stop_loss=args.stop_loss,
         take_profit=args.take_profit, price_for_signal=args.backtest_column, valid=args.valid,
-        lot_size=args.lot_size, signals=signals, re_sample_frequency=['15MIN']
+        lot_size=args.lot_size, signals=signals, re_sample_frequency=['15MIN', '5MIN'],
+        other_signals=other_signals
     )
-
     strategy_result = bt.run()
-    print(strategy_result)
     print(time() - t)
-    strategy_result = strategy_result[strategy_result['TRADE_STATUS'] == 2]
+    print(strategy_result)
+    strategy_result.to_csv('test2.csv')
+    del bt
+    del data
+    return strategy_result
     strategy_result = pd.read_csv('all_pair.csv')
     # strategy_result['TIMESTAMP'] = strategy_result['TIMESTAMP'].astype('datetime64[ns]')
     # strategy_result['DT_CLOSE'] = strategy_result['DT_CLOSE'].astype('datetime64[ns]')
@@ -537,4 +809,7 @@ class StrategyStats:
 
 
 if __name__ == '__main__':
-    run_strategy()
+    a = []
+    for pair in list(cst.BACK_TEST.keys())[10:11]:
+        # run_strategy(pair).to_csv(f'{pair}_extended.csv')
+        run_strategy(pair)

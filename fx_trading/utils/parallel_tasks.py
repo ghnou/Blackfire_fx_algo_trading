@@ -44,14 +44,6 @@ class AsyncMP:
 
         with multiprocessing.Pool(self._num_cpu) as pool:
             result = pool.starmap_async(func, params)
-            # cycler = itertools.cycle('\|/―')
-            # while not result.ready():
-            #     value = "\rTasks left: {} / {}. {}\t".format(
-            #         result._number_left, len(params),
-            #         next(cycler))
-            #     logger.write(value)
-            #     logger.flush()
-            #     time.sleep(0.1)
             got = result.get()
         logger.write("\nTasks completed. Processed {} df in {:.1f}s\n".format(
             len(got), time.time() - start))
